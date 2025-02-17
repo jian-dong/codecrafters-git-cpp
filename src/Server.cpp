@@ -5,6 +5,7 @@
 #include <filesystem> // C++17 文件系统库
 #include <sstream>
 #include <cstring>
+#include <openssl/sha.h>
 
 namespace fs = std::filesystem;
 
@@ -87,6 +88,30 @@ std::string read_object_content(const fs::path& git_dir, const std::string& obje
     return decompressed_data.substr(null_pos + 1); // 只返回内容
 }
 
+
+// 计算 Git blob 对象的 SHA1 哈希值
+std::string hash_object(const std::string& content) {
+    // 构造 header: "blob <size>\0"
+    std::string header = "blob " + std::to_string(content.size());
+    header.push_back('\0');  // 添加空字符作为分隔符
+
+    // 拼接 header 与内容
+    std::string store = header + content;
+
+    // 计算 SHA1 哈希值
+    unsigned char hash[SHA_DIGEST_LENGTH];
+    SHA1(reinterpret_cast<const unsigned char*>(store.data()), store.size(), hash);
+
+    // 将二进制哈希转换为十六进制字符串
+    std::stringstream ss;
+    for (int i = 0; i < SHA_DIGEST_LENGTH; ++i) {
+        ss << std::hex << std::setw(2) << std::setfill('0') 
+           << static_cast<int>(hash[i]);
+    }
+    return ss.str();
+}
+
+
 int main(int argc, char *argv[]) {
   // Flush after every std::cout / std::cerr
   std::cout << std::unitbuf;
@@ -149,8 +174,33 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
 
-  }
-  else {
+  } else if (command == "hash-object") {
+    if (argc < 4) {
+      std::cerr << "Usage: hash-object -w <file>\n";
+      return EXIT_FAILURE;
+    }
+
+    std::string option = argv[2];
+    std::string file = argv[3];
+
+    if (option != "-w") {
+      std::cerr << "Only -w option is supported.\n";
+      return EXIT_FAILURE;
+    }
+
+    std::ifstream fileStream(file, std::ios::binary);
+    if (!fileStream.is_open()) {
+      std::cerr << "Failed to open file: " << file << '\n';
+      return EXIT_FAILURE;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(fileStream)),
+                        std::istreambuf_iterator<char>());
+    fileStream.close();
+
+    std::string object_hash = hash_object(content);
+    std::cout << object_hash << '\n';
+  } else {
     std::cerr << "Unknown command " << command << '\n';
     return EXIT_FAILURE;
   }
