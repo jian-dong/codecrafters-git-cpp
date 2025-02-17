@@ -38,7 +38,28 @@ int main(int argc, char *argv[]) {
       std::cerr << e.what() << '\n';
       return EXIT_FAILURE;
     }
-  } else {
+  } else if (command == "cat-file") {
+    if (argc < 3) {
+      std::cerr << "No object hash provided.\n";
+      return EXIT_FAILURE;
+    }
+
+    std::string objectHash = argv[2];
+    std::string objectPath = ".git/objects/" + objectHash.substr(0, 2) + "/" +
+                             objectHash.substr(2, objectHash.length() - 2);
+
+    std::ifstream objectFile(objectPath, std::ios::binary);
+    if (objectFile.is_open()) {
+      std::string objectContent((std::istreambuf_iterator<char>(objectFile)),
+                                std::istreambuf_iterator<char>());
+      std::cout << objectContent;
+      objectFile.close();
+    } else {
+      std::cerr << "Failed to open object file.\n";
+      return EXIT_FAILURE;
+    }
+  }
+  else {
     std::cerr << "Unknown command " << command << '\n';
     return EXIT_FAILURE;
   }
