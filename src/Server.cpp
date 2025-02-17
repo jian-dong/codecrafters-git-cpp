@@ -6,13 +6,20 @@
 #include <stdexcept>
 #include <cstring>
 #include <filesystem>
+#include <vector>
 #include <zlib.h>
 #include <openssl/sha.h>
 
 namespace fs = std::filesystem;
 
-// 解压缩 zlib 压缩的数据
-std::string zlib_decompress(const std::string& compressed_data) {
+/**
+ * @brief Decompresses zlib-compressed data.
+ *
+ * @param compressedData The input compressed string.
+ * @return The decompressed string.
+ * @throws std::runtime_error if decompression fails.
+ */
+std::string zlib_decompress(const std::string &compressedData) {
     z_stream zs;
     std::memset(&zs, 0, sizeof(zs));
 
@@ -20,25 +27,22 @@ std::string zlib_decompress(const std::string& compressed_data) {
         throw std::runtime_error("inflateInit failed");
     }
 
-    // 注意：由于 compressed_data.data() 返回 const char*，
-    // 这里使用 const_cast 来兼容 zlib 的接口
-    zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressed_data.data()));
-    zs.avail_in = static_cast<uInt>(compressed_data.size());
+    // zlib expects a non-const pointer
+    zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressedData.data()));
+    zs.avail_in = static_cast<uInt>(compressedData.size());
 
     int ret;
-    const size_t buffer_size = 32768; // 32KB 缓冲区
-    char outbuffer[buffer_size];
-    std::string decompressed_data;
+    constexpr size_t bufferSize = 32768; // 32KB buffer
+    char outBuffer[bufferSize];
+    std::string decompressed;
 
     do {
-        zs.next_out = reinterpret_cast<Bytef*>(outbuffer);
-        zs.avail_out = buffer_size;
+        zs.next_out = reinterpret_cast<Bytef*>(outBuffer);
+        zs.avail_out = bufferSize;
 
         ret = inflate(&zs, 0);
-
-        // 将新产生的解压数据追加到结果字符串中
-        if (decompressed_data.size() < zs.total_out) {
-            decompressed_data.append(outbuffer, zs.total_out - decompressed_data.size());
+        if (decompressed.size() < zs.total_out) {
+            decompressed.append(outBuffer, zs.total_out - decompressed.size());
         }
     } while (ret == Z_OK);
 
@@ -48,10 +52,15 @@ std::string zlib_decompress(const std::string& compressed_data) {
         throw std::runtime_error("inflate failed: " + std::to_string(ret));
     }
 
-    return decompressed_data;
+    return decompressed;
 }
 
-// 从当前目录或父目录中查找 .git 目录
+/**
+ * @brief Recursively searches for a .git directory in the current or parent directories.
+ *
+ * @param path The starting path (default is the current path).
+ * @return The path to the .git directory, or an empty path if not found.
+ */
 fs::path find_git_root(fs::path path = fs::current_path()) {
     while (!path.empty()) {
         if (fs::exists(path / ".git") && fs::is_directory(path / ".git")) {
@@ -66,58 +75,121 @@ fs::path find_git_root(fs::path path = fs::current_path()) {
     return "";
 }
 
-// 读取 Git 对象文件并返回其内容（跳过对象头部）
-std::string read_object_content(const fs::path& git_dir, const std::string& object_hash) {
-    fs::path object_path = git_dir / "objects" / object_hash.substr(0, 2) / object_hash.substr(2);
-
-    if (!fs::exists(object_path)) {
-        throw std::runtime_error("Object not found: " + object_hash);
+/**
+ * @brief Reads a Git object file and returns its content (skipping the header).
+ *
+ * @param gitDir The .git directory.
+ * @param objectHash The hash of the object.
+ * @return The object content.
+ * @throws std::runtime_error if the object is not found or is invalid.
+ */
+std::string read_object_content(const fs::path &gitDir, const std::string &objectHash) {
+    fs::path objectPath = gitDir / "objects" / objectHash.substr(0, 2) / objectHash.substr(2);
+    if (!fs::exists(objectPath)) {
+        throw std::runtime_error("Object not found: " + objectHash);
     }
 
-    std::ifstream object_file(object_path, std::ios::binary);
-    if (!object_file.is_open()) {
-        throw std::runtime_error("Failed to open object file: " + object_path.string());
+    std::ifstream objectFile(objectPath, std::ios::binary);
+    if (!objectFile.is_open()) {
+        throw std::runtime_error("Failed to open object file: " + objectPath.string());
     }
 
-    std::string compressed_data((std::istreambuf_iterator<char>(object_file)),
-                                  std::istreambuf_iterator<char>());
-    object_file.close();
+    std::string compressedData((std::istreambuf_iterator<char>(objectFile)),
+                                 std::istreambuf_iterator<char>());
+    objectFile.close();
 
-    std::string decompressed_data = zlib_decompress(compressed_data);
+    std::string decompressed = zlib_decompress(compressedData);
 
-    // 查找对象头部和实际内容之间的 '\0'
-    size_t null_pos = decompressed_data.find('\0');
-    if (null_pos == std::string::npos) {
-        throw std::runtime_error("Invalid object format: " + object_hash);
+    // Skip the header (up to the first '\0')
+    size_t nullPos = decompressed.find('\0');
+    if (nullPos == std::string::npos) {
+        throw std::runtime_error("Invalid object format: " + objectHash);
     }
 
-    return decompressed_data.substr(null_pos + 1);
+    return decompressed.substr(nullPos + 1);
 }
 
-// 计算 Git blob 对象的 SHA1 哈希值
-std::string hash_object(const std::string& content) {
-    // 构造 Git 对象头部: "blob <size>\0"
-    std::string header = "blob " + std::to_string(content.size());
-    header.push_back('\0');
-
-    // 拼接 header 和实际内容
-    std::string store = header + content;
-
-    // 计算 SHA1 哈希值
+/**
+ * @brief Computes the SHA1 hash of the given data and returns it as a hexadecimal string.
+ *
+ * @param data The input data.
+ * @return The SHA1 hash in hex.
+ */
+std::string sha_file(const std::string &data) {
     unsigned char hash[SHA_DIGEST_LENGTH];
-    SHA1(reinterpret_cast<const unsigned char*>(store.data()), store.size(), hash);
+    // Compute SHA1 hash
+    SHA1(reinterpret_cast<const unsigned char*>(data.c_str()), data.size(), hash);
 
-    // 转换为十六进制字符串
     std::stringstream ss;
     ss << std::hex << std::setfill('0');
-    for (int i = 0; i < SHA_DIGEST_LENGTH; ++i) {
+    for (size_t i = 0; i < SHA_DIGEST_LENGTH; ++i) {
         ss << std::setw(2) << static_cast<int>(hash[i]);
     }
     return ss.str();
 }
 
-int main(int argc, char* argv[]) {
-    // 保证每次 std::cout / std::cerr 输出后立即刷新
+/**
+ * @brief Compresses the given data using zlib.
+ *
+ * @param data The input data to compress.
+ * @param bound Pointer to the size of the destination buffer (will be updated with the actual compressed size).
+ * @param dest The destination buffer to hold compressed data.
+ * @throws std::runtime_error if compression fails.
+ */
+void compressFile(const std::string &data, uLong *bound, unsigned char *dest) {
+    int ret = compress(dest, bound, reinterpret_cast<const Bytef*>(data.c_str()), data.size());
+    if (ret != Z_OK) {
+        throw std::runtime_error("Compression failed: " + std::to_string(ret));
+    }
+}
+
+/**
+ * @brief Reads a file, constructs a Git blob object, compresses it, writes it to the repository,
+ * and returns the computed object hash.
+ *
+ * @param filePath The path to the file.
+ * @return The SHA1 hash of the blob object.
+ */
+std::string hash_object(const std::string &filePath) {
+    // Read file contents
+    std::ifstream fileStream(filePath, std::ios::binary);
+    if (!fileStream.is_open()) {
+        throw std::runtime_error("Failed to open file: " + filePath);
+    }
+    std::stringstream buffer;
+    buffer << fileStream.rdbuf();
+    fileStream.close();
+    std::string fileContents = buffer.str();
+
+    // Construct blob object: "blob <size>\0<content>"
+    std::string blobContent = "blob " + std::to_string(fileContents.size()) + '\0' + fileContents;
+
+    // Compute SHA1 hash of the blob
+    std::string objectHash = sha_file(blobContent);
+
+    // Compress the blob content
+    uLong compressBoundSize = compressBound(blobContent.size());
+    std::vector<unsigned char> compressedData(compressBoundSize);
+    compressFile(blobContent, &compressBoundSize, compressedData.data());
+
+    // Create directory .git/objects/XX where XX are the first two characters of the hash
+    std::string dir = ".git/objects/" + objectHash.substr(0, 2);
+    fs::create_directories(dir);
+
+    // Construct the object file path
+    std::string objectPath = dir + "/" + objectHash.substr(2);
+    std::ofstream objectFile(objectPath, std::ios::binary);
+    if (!objectFile.is_open()) {
+        throw std::runtime_error("Failed to open object file for writing: " + objectPath);
+    }
+    objectFile.write(reinterpret_cast<const char*>(compressedData.data()), compressBoundSize);
+    objectFile.close();
+
+    return objectHash;
+}
+
+int main(int argc, char *argv[]) {
+    // Ensure output is flushed immediately
     std::cout << std::unitbuf;
     std::cerr << std::unitbuf;
 
@@ -129,21 +201,18 @@ int main(int argc, char* argv[]) {
     std::string command = argv[1];
 
     if (command == "init") {
-        // 初始化一个简单的 Git 仓库结构
+        // Initialize a simple Git repository structure
         try {
-            fs::create_directory(".git");
-            fs::create_directory(".git/objects");
-            fs::create_directory(".git/refs");
-            fs::create_directory(".git/refs/heads");
+            fs::create_directories(".git/objects");
+            fs::create_directories(".git/refs/heads");
 
             std::ofstream headFile(".git/HEAD");
-            if (headFile.is_open()) {
-                headFile << "ref: refs/heads/main\n";
-                headFile.close();
-            } else {
+            if (!headFile.is_open()) {
                 std::cerr << "Failed to create .git/HEAD file.\n";
                 return EXIT_FAILURE;
             }
+            headFile << "ref: refs/heads/main\n";
+            headFile.close();
 
             std::cout << "Initialized git directory\n";
         } catch (const fs::filesystem_error &e) {
@@ -151,35 +220,35 @@ int main(int argc, char* argv[]) {
             return EXIT_FAILURE;
         }
     } else if (command == "cat-file") {
-        // 用法: cat-file -p <object-hash>
+        // Usage: cat-file -p <object-hash>
         if (argc < 4) {
             std::cerr << "Usage: cat-file -p <object-hash>\n";
             return EXIT_FAILURE;
         }
 
         std::string option = argv[2];
-        std::string object_hash = argv[3];
+        std::string objectHash = argv[3];
 
         if (option != "-p") {
             std::cerr << "Only -p option is supported.\n";
             return EXIT_FAILURE;
         }
 
-        fs::path git_dir = find_git_root();
-        if (git_dir.empty()) {
+        fs::path gitDir = find_git_root();
+        if (gitDir.empty()) {
             std::cerr << "Not a git repository (or any of the parent directories)\n";
             return EXIT_FAILURE;
         }
 
         try {
-            std::string content = read_object_content(git_dir, object_hash);
+            std::string content = read_object_content(gitDir, objectHash);
             std::cout << content;
-        } catch (const std::exception& e) {
+        } catch (const std::exception &e) {
             std::cerr << "Error: " << e.what() << "\n";
             return EXIT_FAILURE;
         }
     } else if (command == "hash-object") {
-        // 用法: hash-object -w <file>
+        // Usage: hash-object -w <file>
         if (argc < 4) {
             std::cerr << "Usage: hash-object -w <file>\n";
             return EXIT_FAILURE;
@@ -193,18 +262,13 @@ int main(int argc, char* argv[]) {
             return EXIT_FAILURE;
         }
 
-        std::ifstream fileStream(file, std::ios::binary);
-        if (!fileStream.is_open()) {
-            std::cerr << "Failed to open file: " << file << "\n";
+        try {
+            std::string objectHash = hash_object(file);
+            std::cout << objectHash << "\n";
+        } catch (const std::exception &e) {
+            std::cerr << "Error: " << e.what() << "\n";
             return EXIT_FAILURE;
         }
-
-        std::string content((std::istreambuf_iterator<char>(fileStream)),
-                            std::istreambuf_iterator<char>());
-        fileStream.close();
-
-        std::string object_hash = hash_object(content);
-        std::cout << object_hash << "\n";
     } else {
         std::cerr << "Unknown command " << command << "\n";
         return EXIT_FAILURE;
