@@ -188,6 +188,102 @@ std::string hash_object(const std::string &filePath) {
     return objectHash;
 }
 
+std::string read_tree_object(const fs::path &gitDir, const std::string &treeHash) {
+    fs::path objectPath = gitDir / "objects" / treeHash.substr(0, 2) / treeHash.substr(2);
+    if (!fs::exists(objectPath)) {
+        throw std::runtime_error("Object not found: " + treeHash);
+    }
+    std::ifstream objectFile(objectPath, std::ios::binary);
+    if (!objectFile.is_open()) {
+        throw std::runtime_error("Failed to open object file: " + objectPath.string());
+    }
+    std::string compressedContent((std::istreambuf_iterator<char>(objectFile)),
+                                    std::istreambuf_iterator<char>());
+    objectFile.close();
+
+    // Decompress the content
+    z_stream zStream;
+    zStream.zalloc = Z_NULL;
+    zStream.zfree = Z_NULL;
+    zStream.opaque = Z_NULL;
+    zStream.avail_in = compressedContent.size();
+    zStream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressedContent.data()));
+
+    if (inflateInit2(&zStream, 15 + 32) != Z_OK) { // 15 + 32 for gzip and zlib both, auto detect
+        throw std::runtime_error("Failed to initialize zlib inflate");
+    }
+
+    std::string decompressedContent;
+    int ret;
+    do {
+        char buffer[1024];
+        zStream.avail_out = sizeof(buffer);
+        zStream.next_out = reinterpret_cast<Bytef*>(buffer);
+
+        ret = inflate(&zStream, Z_SYNC_FLUSH); // Z_SYNC_FLUSH to handle potential errors
+
+        if (ret < 0 && ret != Z_BUF_ERROR && ret != Z_OK && ret != Z_STREAM_END) {
+            inflateEnd(&zStream);
+            throw std::runtime_error("Zlib inflate error: " + std::to_string(ret));
+        }
+
+        if (ret == Z_BUF_ERROR || ret == Z_OK || ret == Z_STREAM_END) {
+            decompressedContent.append(buffer, sizeof(buffer) - zStream.avail_out);
+        }
+
+    } while (ret != Z_STREAM_END && zStream.avail_out == 0);
+
+    inflateEnd(&zStream);
+
+    // Parse the content
+    std::istringstream contentStream(decompressedContent);
+    std::string type;
+    size_t size;
+    char nullChar;
+    contentStream >> type >> size >> std::noskipws >> nullChar; // Read "tree size\0"
+    if (type != "tree" || nullChar != '\0') {
+        throw std::runtime_error("Object is not a tree or has invalid format");
+    }
+
+    std::string entriesData = decompressedContent.substr(contentStream.tellg());
+    std::string result = "";
+    size_t pos = 0;
+    while (pos < entriesData.size()) {
+        size_t spacePos = entriesData.find(' ', pos);
+        if (spacePos == std::string::npos) break;
+        std::string modeStr = entriesData.substr(pos, spacePos - pos);
+        pos = spacePos + 1;
+
+        size_t nullPos = entriesData.find('\0', pos);
+        if (nullPos == std::string::npos) break;
+        std::string name = entriesData.substr(pos, nullPos - pos);
+        pos = nullPos + 1;
+
+        if (pos + 20 > entriesData.size()) break; // Hash is 20 bytes (SHA1)
+        std::string hash = entriesData.substr(pos, 20);
+        pos += 20;
+
+        std::stringstream ss;
+        ss << std::oct << std::stoi(modeStr);
+        int mode;
+        ss >> mode;
+        std::string typeStr = ((mode & 040000) == 040000) ? "tree" : "blob";
+
+
+        std::stringstream hash_hex_ss;
+        hash_hex_ss << std::hex << std::setfill('0');
+        for (unsigned char c : hash) {
+            hash_hex_ss << std::setw(2) << static_cast<int>(c);
+        }
+        std::string hashHex = hash_hex_ss.str();
+
+
+        result += modeStr + " " + typeStr + " " + hashHex + "\t" + name + "\n";
+    }
+
+    return result;
+}
+
 int main(int argc, char *argv[]) {
     // Ensure output is flushed immediately
     std::cout << std::unitbuf;
@@ -269,7 +365,33 @@ int main(int argc, char *argv[]) {
             std::cerr << "Error: " << e.what() << "\n";
             return EXIT_FAILURE;
         }
-    } else {
+    } else if (command == "ls-tree") {
+        // Usage ls-tree --name-only <tree-hash>
+        if (argc < 4) {
+            std::cerr << "Usage: ls-tree --name-only <tree-hash>\n";
+            return EXIT_FAILURE;
+        }
+
+        std::string option = argv[2];
+        std::string treeHash = argv[3];
+
+        if (option != "--name-only") {
+            std::cerr << "Only --name-only option is supported.\n";
+            return EXIT_FAILURE;
+        }
+
+        fs::path gitDir = find_git_root();
+        if (gitDir.empty()) {
+            std::cerr << "Not a git repository (or any of the parent directories)\n";
+            return EXIT_FAILURE;
+        }
+        // read tree object
+        std::string treeContent = read_object_content(gitDir, treeHash);
+        std::cout << treeContent << "\n";
+
+        
+    }
+     else {
         std::cerr << "Unknown command " << command << "\n";
         return EXIT_FAILURE;
     }
