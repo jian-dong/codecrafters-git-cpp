@@ -251,8 +251,7 @@ std::string read_tree_object(const fs::path &gitDir, const std::string &treeHash
     while (pos < entriesData.size()) {
         size_t spacePos = entriesData.find(' ', pos);
         if (spacePos == std::string::npos) break;
-        std::string modeStr = entriesData.substr(pos, spacePos - pos);
-        pos = spacePos + 1;
+        pos = spacePos + 1; // Skip mode
 
         size_t nullPos = entriesData.find('\0', pos);
         if (nullPos == std::string::npos) break;
@@ -260,25 +259,9 @@ std::string read_tree_object(const fs::path &gitDir, const std::string &treeHash
         pos = nullPos + 1;
 
         if (pos + 20 > entriesData.size()) break; // Hash is 20 bytes (SHA1)
-        std::string hash = entriesData.substr(pos, 20);
-        pos += 20;
+        pos += 20; // Skip hash
 
-        std::stringstream ss;
-        ss << std::oct << std::stoi(modeStr);
-        int mode;
-        ss >> mode;
-        std::string typeStr = ((mode & 040000) == 040000) ? "tree" : "blob";
-
-
-        std::stringstream hash_hex_ss;
-        hash_hex_ss << std::hex << std::setfill('0');
-        for (unsigned char c : hash) {
-            hash_hex_ss << std::setw(2) << static_cast<int>(c);
-        }
-        std::string hashHex = hash_hex_ss.str();
-
-
-        result += modeStr + " " + typeStr + " " + hashHex + "\t" + name + "\n";
+        result += name + "\n";
     }
 
     return result;
