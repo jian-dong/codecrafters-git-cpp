@@ -381,7 +381,7 @@ int main(int argc, char *argv[]) {
         }
         // read tree object
         std::string treeContent = read_tree_object(gitDir, treeHash);
-        std::cout << treeContent << "\n";
+        std::cout << treeContent;
 
         
     }
