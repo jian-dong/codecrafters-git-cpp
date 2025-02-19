@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <vector>
+#include <algorithm>
 #include <zlib.h>
 #include <openssl/sha.h>
 
@@ -187,17 +188,17 @@ std::string hash_object(const std::string &filePath) {
 
     return objectHash;
 }
-#include <filesystem>
-#include <fstream>
-#include <iostream>
+
 #include <sstream>
 #include <vector>
-#include <zlib.h>
-#include <iomanip>
-#include <algorithm>
 
-namespace fs = std::filesystem;
-
+/**
+ * @brief Reads a tree object, parses its entries, and returns the names (sorted) each on一行.
+ *
+ * @param gitDir The .git directory.
+ * @param treeHash The hash of the tree object.
+ * @return A string with each entry name followed by a newline.
+ */
 std::string read_tree_object(const fs::path &gitDir, const std::string &treeHash) {
     fs::path objectPath = gitDir / "objects" / treeHash.substr(0, 2) / treeHash.substr(2);
     if (!fs::exists(objectPath)) {
@@ -274,8 +275,100 @@ std::string read_tree_object(const fs::path &gitDir, const std::string &treeHash
         result += n + "\n";
     }
 
-
     return result;
+}
+
+/**
+ * @brief Helper: Converts a hex string to a binary string.
+ *
+ * @param hex The hex string (expected even length).
+ * @return A string containing the binary data.
+ */
+std::string hexToBytes(const std::string &hex) {
+    std::string bytes;
+    bytes.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        std::string byteStr = hex.substr(i, 2);
+        char byte = static_cast<char>(std::stoi(byteStr, nullptr, 16));
+        bytes.push_back(byte);
+    }
+    return bytes;
+}
+
+/**
+ * @brief Recursively writes the current directory structure as a Git tree object.
+ *
+ * For each entry in the directory (skipping .git):
+ *   - For regular files, calls hash_object to create a blob (mode "100644").
+ *   - For directories, recursively calls write_tree (mode "40000").
+ *
+ * The tree object is constructed as:
+ *   "tree <size>\0" + (for each entry: "<mode> <filename>\0" + raw 20-byte hash)
+ *
+ * @param directory The directory path to write as a tree.
+ * @return The SHA1 hash of the tree object.
+ * @throws std::runtime_error if writing fails.
+ */
+std::string write_tree(const fs::path &directory) {
+    struct TreeEntry {
+         std::string mode;
+         std::string name;
+         std::string hash; // 40-character hex string
+    };
+    std::vector<TreeEntry> entries;
+
+    for (const auto &entry : fs::directory_iterator(directory)) {
+        // Skip .git 目录
+        if (entry.path().filename() == ".git")
+            continue;
+
+        if (fs::is_directory(entry.path())) {
+            std::string treeHash = write_tree(entry.path());
+            entries.push_back({"40000", entry.path().filename().string(), treeHash});
+        } else if (fs::is_regular_file(entry.path())) {
+            std::string blobHash = hash_object(entry.path().string());
+            entries.push_back({"100644", entry.path().filename().string(), blobHash});
+        }
+        // 其他类型（如符号链接）可以按需求处理
+    }
+
+    // 按文件名排序
+    std::sort(entries.begin(), entries.end(), [](const TreeEntry &a, const TreeEntry &b) {
+         return a.name < b.name;
+    });
+
+    // 构造 tree body：每个 entry 为 "<mode> <filename>\0" + raw hash(20 字节)
+    std::string treeBody;
+    for (const auto &e : entries) {
+        treeBody += e.mode + " " + e.name + '\0';
+        treeBody += hexToBytes(e.hash);
+    }
+
+    // 构造完整的 tree 对象内容： header + body
+    std::string fullContent = "tree " + std::to_string(treeBody.size()) + '\0' + treeBody;
+    std::string treeHash = sha_file(fullContent);
+
+    // 压缩内容并写入 .git/objects
+    uLong compressBoundSize = compressBound(fullContent.size());
+    std::vector<unsigned char> compressedData(compressBoundSize);
+    compressFile(fullContent, &compressBoundSize, compressedData.data());
+
+    fs::path gitDir = find_git_root(fs::current_path());
+    if (gitDir.empty()) {
+         // 如果没有找到，则默认在当前目录下的 .git 文件夹
+         gitDir = fs::current_path() / ".git";
+    }
+    fs::path objectDir = gitDir / "objects" / treeHash.substr(0, 2);
+    fs::create_directories(objectDir);
+    fs::path objectPath = objectDir / treeHash.substr(2);
+    std::ofstream objectFile(objectPath, std::ios::binary);
+    if (!objectFile.is_open()) {
+         throw std::runtime_error("Failed to open object file for writing: " + objectPath.string());
+    }
+    objectFile.write(reinterpret_cast<const char*>(compressedData.data()), compressBoundSize);
+    objectFile.close();
+
+    return treeHash;
 }
 
 int main(int argc, char *argv[]) {
@@ -360,7 +453,7 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
     } else if (command == "ls-tree") {
-        // Usage ls-tree --name-only <tree-hash>
+        // Usage: ls-tree --name-only <tree-hash>
         if (argc < 4) {
             std::cerr << "Usage: ls-tree --name-only <tree-hash>\n";
             return EXIT_FAILURE;
@@ -379,13 +472,25 @@ int main(int argc, char *argv[]) {
             std::cerr << "Not a git repository (or any of the parent directories)\n";
             return EXIT_FAILURE;
         }
-        // read tree object
-        std::string treeContent = read_tree_object(gitDir, treeHash);
-        std::cout << treeContent;
-
-        
-    }
-     else {
+        // 使用正确的解析函数
+        try {
+            std::string treeContent = read_tree_object(gitDir, treeHash);
+            std::cout << treeContent << "\n";
+        } catch (const std::exception &e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return EXIT_FAILURE;
+        }
+    } else if (command == "write-tree") {
+        // Usage: write-tree
+        try {
+            // 以当前目录为工作树（自动跳过 .git 目录）
+            std::string treeHash = write_tree(fs::current_path());
+            std::cout << treeHash << "\n";
+        } catch (const std::exception &e) {
+            std::cerr << "Error: " << e.what() << "\n";
+            return EXIT_FAILURE;
+        }
+    } else {
         std::cerr << "Unknown command " << command << "\n";
         return EXIT_FAILURE;
     }
