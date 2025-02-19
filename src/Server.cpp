@@ -475,7 +475,7 @@ int main(int argc, char *argv[]) {
         // 使用正确的解析函数
         try {
             std::string treeContent = read_tree_object(gitDir, treeHash);
-            std::cout << treeContent << "\n";
+            std::cout << treeContent;
         } catch (const std::exception &e) {
             std::cerr << "Error: " << e.what() << "\n";
             return EXIT_FAILURE;
