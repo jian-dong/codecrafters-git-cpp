@@ -187,6 +187,16 @@ std::string hash_object(const std::string &filePath) {
 
     return objectHash;
 }
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <vector>
+#include <zlib.h>
+#include <iomanip>
+#include <algorithm>
+
+namespace fs = std::filesystem;
 
 std::string read_tree_object(const fs::path &gitDir, const std::string &treeHash) {
     fs::path objectPath = gitDir / "objects" / treeHash.substr(0, 2) / treeHash.substr(2);
@@ -247,22 +257,23 @@ std::string read_tree_object(const fs::path &gitDir, const std::string &treeHash
 
     std::string entriesData = decompressedContent.substr(contentStream.tellg());
     std::string result = "";
+    std::vector<std::string> names;
     size_t pos = 0;
     while (pos < entriesData.size()) {
         size_t spacePos = entriesData.find(' ', pos);
         if (spacePos == std::string::npos) break;
-        pos = spacePos + 1; // Skip mode
-
-        size_t nullPos = entriesData.find('\0', pos);
+        size_t nullPos = entriesData.find('\0', spacePos + 1);
         if (nullPos == std::string::npos) break;
-        std::string name = entriesData.substr(pos, nullPos - pos);
-        pos = nullPos + 1;
 
-        if (pos + 20 > entriesData.size()) break; // Hash is 20 bytes (SHA1)
-        pos += 20; // Skip hash
-
-        result += name + "\n";
+        std::string name = entriesData.substr(spacePos + 1, nullPos - (spacePos + 1));
+        names.push_back(name);
+        pos = nullPos + 21; // Move position to after null byte and 20-byte hash
     }
+    std::sort(names.begin(), names.end());
+    for(const auto& n : names) {
+        result += n + "\n";
+    }
+
 
     return result;
 }
