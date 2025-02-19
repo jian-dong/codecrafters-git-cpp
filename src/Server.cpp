@@ -380,7 +380,7 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
         // read tree object
-        std::string treeContent = read_object_content(gitDir, treeHash);
+        std::string treeContent = read_tree_object(gitDir, treeHash);
         std::cout << treeContent << "\n";
 
         
