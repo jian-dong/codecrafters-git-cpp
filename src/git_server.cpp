@@ -311,34 +311,29 @@ void handle_git_commit_tree(const fs::path& git_dir, const std::string& tree_has
         }
     }
 
-    // Build commit object content
-    std::stringstream commit_content;
-    commit_content << "tree " << tree_hash << "\n";
+    // Hardcoded user information
+    const std::string author = "John Doe <john@example.com>";
+    const std::string committer = author;
+
+    // Get current timestamp
+    auto now = std::chrono::system_clock::now();
+    auto timestamp = std::to_string(
+        std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count()
+    );
+
+    // Build commit content with correct format
+    std::string commit_content = "tree " + tree_hash + "\n";
 
     if (!parent_hash.empty()) {
-        commit_content << "parent " << parent_hash << "\n";
+        commit_content += "parent " + parent_hash + "\n";
     }
 
-    // Hardcoded user information for author and committer
-    const std::string user_name = "John Doe";
-    const std::string user_email = "john@example.com";
-
-    // Get current timestamp (Unix epoch)
-    auto now = std::chrono::system_clock::now();
-    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
-
-    // Hardcode timezone to +0000 for simplicity
-    const std::string tz = "+0000";
-
-    // Add author and committer information
-    commit_content << "author " << user_name << " <" << user_email << "> "
-                  << timestamp << " " << tz << "\n";
-    commit_content << "committer " << user_name << " <" << user_email << "> "
-                  << timestamp << " " << tz << "\n";
-    commit_content << "\n" << commit_message << "\n";
+    commit_content += "author " + author + " " + timestamp + " -0800\n" +
+                     "committer " + committer + " " + timestamp + " -0800\n" +
+                     "\n" + commit_message + "\n";
 
     // Prepare the content with Git object header
-    std::string content = "commit " + std::to_string(commit_content.str().length()) + "\0" + commit_content.str();
+    std::string content = "commit " + std::to_string(commit_content.length()) + "\0" + commit_content;
 
     // Calculate SHA1 hash
     unsigned char hash[20];
