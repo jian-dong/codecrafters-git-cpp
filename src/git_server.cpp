@@ -62,8 +62,8 @@ std::string hash_object(const std::string& file_path) {
 
   // Compress the blob content
   uLong compress_bound_size = compressBound(blob_content.size());
-  std::vector<unsigned char> compressedData(compress_bound_size);
-  zlib_compress_file(blob_content, &compress_bound_size, compressedData.data());
+  std::vector<unsigned char> compressed_data(compress_bound_size);
+  zlib_compress_file(blob_content, &compress_bound_size, compressed_data.data());
 
   // Create directory .git/objects/XX where XX are the first two characters of the hash
   std::string dir = ".git/objects/" + object_hash.substr(0, 2);
@@ -75,7 +75,7 @@ std::string hash_object(const std::string& file_path) {
   if (!object_file.is_open()) {
     throw std::runtime_error("Failed to open object file for writing: " + object_path);
   }
-  object_file.write(reinterpret_cast<const char*>(compressedData.data()), compress_bound_size);
+  object_file.write(reinterpret_cast<const char*>(compressed_data.data()), compress_bound_size);
   object_file.close();
 
   return object_hash;
@@ -312,76 +312,42 @@ void handle_git_commit_tree(const fs::path& git_dir, const std::string& tree_has
     }
 
     // Hardcoded user information
-    const std::string author = "John Doe <john@example.com>";
-    const std::string committer = author;
-
-    // Get current timestamp
-    auto now = std::chrono::system_clock::now();
-    auto timestamp = std::to_string(
-        std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count()
-    );
+    const std::string author = "John Doe <john.doe@gmail.com>";
+    const std::string committer = "John Doe <john.doe@gmail.com>";
+    const std::string timestamp = std::to_string(std::time(nullptr));
 
     // Build commit content with correct format
     std::string commit_content = "tree " + tree_hash + "\n";
-
     if (!parent_hash.empty()) {
         commit_content += "parent " + parent_hash + "\n";
     }
-
     commit_content += "author " + author + " " + timestamp + " -0800\n" +
                      "committer " + committer + " " + timestamp + " -0800\n" +
                      "\n" + commit_message + "\n";
 
-    // Prepare the content with Git object header
-    std::string content = "commit " + std::to_string(commit_content.length()) + "\0" + commit_content;
+    // Create header and full content
+    std::string header = "commit " + std::to_string(commit_content.length()) + '\0';
+    std::string full_content = header + commit_content;
 
-    // Calculate SHA1 hash
-    unsigned char hash[20];
-    SHA1(reinterpret_cast<const unsigned char*>(content.c_str()), content.length(), hash);
-    std::string hash_str = bytes_to_hex_string(hash, 20);
+    // Calculate SHA1
+    std::string commit_hash = sha_file(full_content);
 
-    // Create object directory if it doesn't exist
-    fs::path object_dir = git_dir / "objects" / hash_str.substr(0, 2);
+    // Create object directory
+    fs::path object_dir = git_dir / "objects" / commit_hash.substr(0, 2);
     fs::create_directories(object_dir);
+  uLong compress_bound_size = compressBound(full_content.size());
+  std::vector<unsigned char> compressed_data(compress_bound_size);
+  zlib_compress_file(full_content, &compress_bound_size, compressed_data.data());
 
-    // Open file for writing
-    fs::path object_path = object_dir / hash_str.substr(2);
+    // Write compressed content to file
+    fs::path object_path = object_dir / commit_hash.substr(2);
     std::ofstream object_file(object_path, std::ios::binary);
     if (!object_file) {
         throw std::runtime_error("Failed to create commit object file");
     }
-
-    // Initialize zlib stream
-    z_stream zs;
-    zs.zalloc = Z_NULL;
-    zs.zfree = Z_NULL;
-    zs.opaque = Z_NULL;
-
-    if (deflateInit(&zs, Z_BEST_COMPRESSION) != Z_OK) {
-        throw std::runtime_error("Failed to initialize zlib");
-    }
-
-    // Compress and write content
-    zs.next_in = (Bytef*)content.data();
-    zs.avail_in = content.length();
-
-    char outbuffer[8192];
-    do {
-        zs.next_out = reinterpret_cast<Bytef*>(outbuffer);
-        zs.avail_out = sizeof(outbuffer);
-
-        if (deflate(&zs, Z_FINISH) == Z_STREAM_ERROR) {
-            deflateEnd(&zs);
-            throw std::runtime_error("Failed to compress commit object");
-        }
-
-        object_file.write(outbuffer, sizeof(outbuffer) - zs.avail_out);
-    } while (zs.avail_out == 0);
-
-    // Clean up
-    deflateEnd(&zs);
+    object_file.write(reinterpret_cast<const std::ostream::char_type*>(compressed_data.data()), compressed_data.size());
     object_file.close();
 
     // Output the hash of the new commit
-    std::cout << hash_str << "\n";
+    std::cout << commit_hash << "\n";
 }
