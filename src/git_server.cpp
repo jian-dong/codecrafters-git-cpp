@@ -1,4 +1,5 @@
 #include "git-cpp/git_server.hpp"
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
