@@ -43,7 +43,6 @@ std::string read_object_content(const fs::path& git_dir, const std::string& obje
   return decompressed.substr(nullPos + 1);
 }
 
-
 std::string hash_object(const std::string& file_path) {
   // Read file contents
   std::ifstream file_stream(file_path, std::ios::binary);
@@ -82,7 +81,6 @@ std::string hash_object(const std::string& file_path) {
   return object_hash;
 }
 
-
 std::string read_tree_object(const fs::path& git_dir, const std::string& tree_hash) {
   fs::path object_path = git_dir / "objects" / tree_hash.substr(0, 2) / tree_hash.substr(2);
   if (!fs::exists(object_path)) {
@@ -116,7 +114,7 @@ std::string read_tree_object(const fs::path& git_dir, const std::string& tree_ha
     zStream.avail_out = sizeof(buffer);
     zStream.next_out = reinterpret_cast<Bytef*>(buffer);
 
-    ret = inflate(&zStream, Z_SYNC_FLUSH); // Z_SYNC_FLUSH to handle potential errors
+    ret = inflate(&zStream, Z_SYNC_FLUSH);  // Z_SYNC_FLUSH to handle potential errors
 
     if (ret < 0 && ret != Z_BUF_ERROR && ret != Z_OK && ret != Z_STREAM_END) {
       inflateEnd(&zStream);
@@ -135,7 +133,7 @@ std::string read_tree_object(const fs::path& git_dir, const std::string& tree_ha
   std::string type;
   size_t size;
   char nullChar;
-  content_stream >> type >> size >> std::noskipws >> nullChar; // Read "tree size\0"
+  content_stream >> type >> size >> std::noskipws >> nullChar;  // Read "tree size\0"
   if (type != "tree" || nullChar != '\0') {
     throw std::runtime_error("Object is not a tree or has invalid format");
   }
@@ -152,7 +150,7 @@ std::string read_tree_object(const fs::path& git_dir, const std::string& tree_ha
 
     std::string name = entries_data.substr(space_pos + 1, nullPos - (space_pos + 1));
     names.push_back(name);
-    pos = nullPos + 21; // Move position to after null byte and 20-byte hash
+    pos = nullPos + 21;  // Move position to after null byte and 20-byte hash
   }
   std::sort(names.begin(), names.end());
   for (const auto& n : names) {
@@ -173,19 +171,17 @@ std::string hex_to_bytes(const std::string& hex) {
   return bytes;
 }
 
-
 std::string write_tree(const fs::path& directory) {
   struct TreeEntry {
     std::string mode;
     std::string name;
-    std::string hash; // 40-character hex string
+    std::string hash;  // 40-character hex string
   };
   std::vector<TreeEntry> entries;
 
   for (const auto& entry : fs::directory_iterator(directory)) {
     // Skip .git 目录
-    if (entry.path().filename() == ".git")
-      continue;
+    if (entry.path().filename() == ".git") continue;
 
     if (fs::is_directory(entry.path())) {
       std::string tree_hash = write_tree(entry.path());
@@ -198,9 +194,8 @@ std::string write_tree(const fs::path& directory) {
   }
 
   // 按文件名排序
-  std::sort(entries.begin(), entries.end(), [](const TreeEntry& a, const TreeEntry& b) {
-    return a.name < b.name;
-  });
+  std::sort(entries.begin(), entries.end(),
+            [](const TreeEntry& a, const TreeEntry& b) { return a.name < b.name; });
 
   // 构造 tree body：每个 entry 为 "<mode> <filename>\0" + raw hash(20 字节)
   std::string tree_body;
@@ -289,4 +284,109 @@ void handle_git_ls_tree(const fs::path& git_dir, const std::string& tree_hash) {
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
   }
+}
+
+std::string bytes_to_hex_string(const unsigned char* bytes, size_t length) {
+  std::stringstream ss;
+  ss << std::hex << std::setfill('0');
+  for (size_t i = 0; i < length; i++) {
+    ss << std::setw(2) << static_cast<unsigned>(bytes[i]);
+  }
+  return ss.str();
+}
+
+void handle_git_commit_tree(const fs::path& git_dir, const std::string& tree_hash,
+                            const std::string& parent_hash, const std::string& commit_message) {
+    // Verify if tree object exists
+    fs::path tree_path = git_dir / "objects" / tree_hash.substr(0, 2) / tree_hash.substr(2);
+    if (!fs::exists(tree_path)) {
+        throw std::runtime_error("Tree object not found: " + tree_hash);
+    }
+
+    // If parent hash is provided, verify if it exists
+    if (!parent_hash.empty()) {
+        fs::path parent_path = git_dir / "objects" / parent_hash.substr(0, 2) / parent_hash.substr(2);
+        if (!fs::exists(parent_path)) {
+            throw std::runtime_error("Parent commit not found: " + parent_hash);
+        }
+    }
+
+    // Build commit object content
+    std::stringstream commit_content;
+    commit_content << "tree " << tree_hash << "\n";
+
+    if (!parent_hash.empty()) {
+        commit_content << "parent " << parent_hash << "\n";
+    }
+
+    // Hardcoded user information for author and committer
+    const std::string user_name = "John Doe";
+    const std::string user_email = "john@example.com";
+
+    // Get current timestamp (Unix epoch)
+    auto now = std::chrono::system_clock::now();
+    auto timestamp = std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+
+    // Hardcode timezone to +0000 for simplicity
+    const std::string tz = "+0000";
+
+    // Add author and committer information
+    commit_content << "author " << user_name << " <" << user_email << "> "
+                  << timestamp << " " << tz << "\n";
+    commit_content << "committer " << user_name << " <" << user_email << "> "
+                  << timestamp << " " << tz << "\n";
+    commit_content << "\n" << commit_message << "\n";
+
+    // Prepare the content with Git object header
+    std::string content = "commit " + std::to_string(commit_content.str().length()) + "\0" + commit_content.str();
+
+    // Calculate SHA1 hash
+    unsigned char hash[20];
+    SHA1(reinterpret_cast<const unsigned char*>(content.c_str()), content.length(), hash);
+    std::string hash_str = bytes_to_hex_string(hash, 20);
+
+    // Create object directory if it doesn't exist
+    fs::path object_dir = git_dir / "objects" / hash_str.substr(0, 2);
+    fs::create_directories(object_dir);
+
+    // Open file for writing
+    fs::path object_path = object_dir / hash_str.substr(2);
+    std::ofstream object_file(object_path, std::ios::binary);
+    if (!object_file) {
+        throw std::runtime_error("Failed to create commit object file");
+    }
+
+    // Initialize zlib stream
+    z_stream zs;
+    zs.zalloc = Z_NULL;
+    zs.zfree = Z_NULL;
+    zs.opaque = Z_NULL;
+
+    if (deflateInit(&zs, Z_BEST_COMPRESSION) != Z_OK) {
+        throw std::runtime_error("Failed to initialize zlib");
+    }
+
+    // Compress and write content
+    zs.next_in = (Bytef*)content.data();
+    zs.avail_in = content.length();
+
+    char outbuffer[8192];
+    do {
+        zs.next_out = reinterpret_cast<Bytef*>(outbuffer);
+        zs.avail_out = sizeof(outbuffer);
+
+        if (deflate(&zs, Z_FINISH) == Z_STREAM_ERROR) {
+            deflateEnd(&zs);
+            throw std::runtime_error("Failed to compress commit object");
+        }
+
+        object_file.write(outbuffer, sizeof(outbuffer) - zs.avail_out);
+    } while (zs.avail_out == 0);
+
+    // Clean up
+    deflateEnd(&zs);
+    object_file.close();
+
+    // Output the hash of the new commit
+    std::cout << hash_str << "\n";
 }

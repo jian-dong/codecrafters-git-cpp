@@ -1,5 +1,5 @@
-#include "git-cpp/git_server.hpp"
 #include "git-cpp/CLI11.hpp"
+#include "git-cpp/git_server.hpp"
 
 int main(int argc, char* argv[]) {
   std::cout << std::unitbuf;
@@ -9,8 +9,9 @@ int main(int argc, char* argv[]) {
   app.require_subcommand(1);
 
   // init
-  app.add_subcommand("init", "Initialize a git repository")
-     ->callback([]() { handle_git_init(fs::current_path()); });
+  app.add_subcommand("init", "Initialize a git repository")->callback([]() {
+    handle_git_init(fs::current_path());
+  });
 
   // cat-file -p <hash>
   auto cat_file = app.add_subcommand("cat-file", "Display object content");
@@ -46,9 +47,26 @@ int main(int argc, char* argv[]) {
   });
 
   // write-tree
-  app.add_subcommand("write-tree", "Create a tree object")
-     ->callback([]() { handle_git_write_tree(fs::current_path()); });
+  app.add_subcommand("write-tree", "Create a tree object")->callback([]() {
+    handle_git_write_tree(fs::current_path());
+  });
 
+  // commit-tree <tree> -p <parent> -m <message>
+  auto commit_tree = app.add_subcommand("commit-tree", "Create a commit object");
+  std::string parent_hash;
+  std::string commit_message;
+
+  commit_tree->add_option("tree", tree_hash, "Tree hash")->required();
+  commit_tree->add_option("-p", parent_hash, "Parent commit hash");
+  commit_tree->add_option("-m", commit_message, "Commit message")->required();
+
+  commit_tree->callback([&]() {
+    auto git_dir = find_git_root();
+    if (git_dir.empty()) {
+      throw CLI::ParseError("Not a git repository", EXIT_FAILURE);
+    }
+    handle_git_commit_tree(git_dir, tree_hash, parent_hash, commit_message);
+  });
   CLI11_PARSE(app, argc, argv);
   return EXIT_SUCCESS;
 }

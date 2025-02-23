@@ -2,17 +2,17 @@
 
 #include "utils.hpp"
 
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <string>
-#include <iomanip>
-#include <stdexcept>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <openssl/sha.h>
+#include <sstream>
+#include <stdexcept>
+#include <string>
 #include <vector>
 #include <zlib.h>
-#include <openssl/sha.h>
 
 namespace fs = std::filesystem;
 
@@ -88,3 +88,6 @@ void handle_git_hash_object(const fs::path& file_path);
 void handle_git_write_tree(const fs::path& dir = fs::current_path());
 
 void handle_git_ls_tree(const fs::path& git_dir, const std::string& tree_hash);
+
+void handle_git_commit_tree(const fs::path& git_dir, const std::string& tree_hash, const std::string& parent_hash,
+                            const std::string& commit_message);
