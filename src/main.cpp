@@ -67,6 +67,14 @@ int main(int argc, char* argv[]) {
     }
     handle_git_commit_tree(git_dir, tree_hash, parent_hash, commit_message);
   });
+  // /path/to/your_program.sh clone https://github.com/blah/blah <some_dir>
+  // clone <url> <dest_dir>
+  std::string repo_url;
+  std::string dest_dir;
+  auto clone = app.add_subcommand("clone", "Clone a remote repository");
+  clone->add_option("url", repo_url, "Repository URL")->required();
+  clone->add_option("dest", dest_dir, "Destination directory")->required();
+  clone->callback([&]() { handle_git_clone(repo_url, dest_dir); });
   CLI11_PARSE(app, argc, argv);
   return EXIT_SUCCESS;
 }

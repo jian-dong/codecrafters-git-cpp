@@ -91,3 +91,5 @@ void handle_git_ls_tree(const fs::path& git_dir, const std::string& tree_hash);
 
 void handle_git_commit_tree(const fs::path& git_dir, const std::string& tree_hash, const std::string& parent_hash,
                             const std::string& commit_message);
+
+void handle_git_clone(const std::string& repo_url, const fs::path& dest_dir);

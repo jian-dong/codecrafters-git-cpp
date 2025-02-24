@@ -43,4 +43,9 @@ target_include_directories(${PROG_NAME} PRIVATE
   ${OPENSSL_INCLUDE_DIR}
 )
 
-target_link_libraries(${PROG_NAME} PRIVATE OpenSSL::Crypto -lz)
+target_link_libraries(${PROG_NAME} PRIVATE
+  OpenSSL::Crypto
+  -lz
+  -lpthread
+  -lcurl
+)

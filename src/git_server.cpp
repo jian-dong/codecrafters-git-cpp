@@ -1,5 +1,9 @@
 #include "git-cpp/git_server.hpp"
 #include <algorithm>
+#include <curl/curl.h>
+#include <filesystem>
+#include <set>
+#include <queue>
 
 namespace fs = std::filesystem;
 
@@ -297,57 +301,190 @@ std::string bytes_to_hex_string(const unsigned char* bytes, size_t length) {
 
 void handle_git_commit_tree(const fs::path& git_dir, const std::string& tree_hash,
                             const std::string& parent_hash, const std::string& commit_message) {
-    // Verify if tree object exists
-    fs::path tree_path = git_dir / "objects" / tree_hash.substr(0, 2) / tree_hash.substr(2);
-    if (!fs::exists(tree_path)) {
-        throw std::runtime_error("Tree object not found: " + tree_hash);
+  // Verify if tree object exists
+  fs::path tree_path = git_dir / "objects" / tree_hash.substr(0, 2) / tree_hash.substr(2);
+  if (!fs::exists(tree_path)) {
+    throw std::runtime_error("Tree object not found: " + tree_hash);
+  }
+
+  // If parent hash is provided, verify if it exists
+  if (!parent_hash.empty()) {
+    fs::path parent_path = git_dir / "objects" / parent_hash.substr(0, 2) / parent_hash.substr(2);
+    if (!fs::exists(parent_path)) {
+      throw std::runtime_error("Parent commit not found: " + parent_hash);
     }
+  }
 
-    // If parent hash is provided, verify if it exists
-    if (!parent_hash.empty()) {
-        fs::path parent_path = git_dir / "objects" / parent_hash.substr(0, 2) / parent_hash.substr(2);
-        if (!fs::exists(parent_path)) {
-            throw std::runtime_error("Parent commit not found: " + parent_hash);
-        }
-    }
+  // Hardcoded user information
+  const std::string author = "John Doe <john.doe@gmail.com>";
+  const std::string committer = "John Doe <john.doe@gmail.com>";
+  const std::string timestamp = std::to_string(std::time(nullptr));
 
-    // Hardcoded user information
-    const std::string author = "John Doe <john.doe@gmail.com>";
-    const std::string committer = "John Doe <john.doe@gmail.com>";
-    const std::string timestamp = std::to_string(std::time(nullptr));
+  // Build commit content with correct format
+  std::string commit_content = "tree " + tree_hash + "\n";
+  if (!parent_hash.empty()) {
+    commit_content += "parent " + parent_hash + "\n";
+  }
+  commit_content += "author " + author + " " + timestamp + " -0800\n" + "committer " + committer +
+                    " " + timestamp + " -0800\n" + "\n" + commit_message + "\n";
 
-    // Build commit content with correct format
-    std::string commit_content = "tree " + tree_hash + "\n";
-    if (!parent_hash.empty()) {
-        commit_content += "parent " + parent_hash + "\n";
-    }
-    commit_content += "author " + author + " " + timestamp + " -0800\n" +
-                     "committer " + committer + " " + timestamp + " -0800\n" +
-                     "\n" + commit_message + "\n";
+  // Create header and full content
+  std::string header = "commit " + std::to_string(commit_content.length()) + '\0';
+  std::string full_content = header + commit_content;
 
-    // Create header and full content
-    std::string header = "commit " + std::to_string(commit_content.length()) + '\0';
-    std::string full_content = header + commit_content;
+  // Calculate SHA1
+  std::string commit_hash = sha_file(full_content);
 
-    // Calculate SHA1
-    std::string commit_hash = sha_file(full_content);
-
-    // Create object directory
-    fs::path object_dir = git_dir / "objects" / commit_hash.substr(0, 2);
-    fs::create_directories(object_dir);
+  // Create object directory
+  fs::path object_dir = git_dir / "objects" / commit_hash.substr(0, 2);
+  fs::create_directories(object_dir);
   uLong compress_bound_size = compressBound(full_content.size());
   std::vector<unsigned char> compressed_data(compress_bound_size);
   zlib_compress_file(full_content, &compress_bound_size, compressed_data.data());
 
-    // Write compressed content to file
-    fs::path object_path = object_dir / commit_hash.substr(2);
-    std::ofstream object_file(object_path, std::ios::binary);
-    if (!object_file) {
-        throw std::runtime_error("Failed to create commit object file");
-    }
-    object_file.write(reinterpret_cast<const std::ostream::char_type*>(compressed_data.data()), compressed_data.size());
-    object_file.close();
+  // Write compressed content to file
+  fs::path object_path = object_dir / commit_hash.substr(2);
+  std::ofstream object_file(object_path, std::ios::binary);
+  if (!object_file) {
+    throw std::runtime_error("Failed to create commit object file");
+  }
+  object_file.write(reinterpret_cast<const std::ostream::char_type*>(compressed_data.data()),
+                    compressed_data.size());
+  object_file.close();
 
-    // Output the hash of the new commit
-    std::cout << commit_hash << "\n";
+  // Output the hash of the new commit
+  std::cout << commit_hash << "\n";
+}
+
+void handle_git_clone(const std::string& repo_url, const fs::path& dest_dir) {
+  // Initialize CURL
+  CURL* curl = curl_easy_init();
+  std::shared_ptr<void> curl_guard(nullptr, [curl](void*) { curl_easy_cleanup(curl); });
+  if (!curl) {
+    throw std::runtime_error("Failed to initialize CURL");
+  }
+
+  // Create destination directory
+  fs::create_directories(dest_dir);
+  fs::create_directories(dest_dir / ".git" / "objects");
+  fs::create_directories(dest_dir / ".git" / "refs");
+
+  try {
+    // Construct info/refs URL
+    std::string info_refs_url = repo_url + "/info/refs?service=git-upload-pack";
+
+    // Configure CURL request
+    curl_easy_setopt(curl, CURLOPT_URL, info_refs_url.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+
+    // Buffer for response
+    std::string response;
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+                     [](char* ptr, size_t size, size_t nmemb, void* userdata) {
+                       std::string* response = static_cast<std::string*>(userdata);
+                       response->append(ptr, size * nmemb);
+                       return size * nmemb;
+                     });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
+    // Perform request
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+      throw std::runtime_error(std::string("Failed to fetch refs: ") + curl_easy_strerror(res));
+    }
+
+    // Parse refs response to get HEAD ref
+    std::string head_ref;
+    std::istringstream refs_stream(response);
+    std::string line;
+    while (std::getline(refs_stream, line)) {
+      if (line.find("refs/heads/main") != std::string::npos ||
+          line.find("refs/heads/master") != std::string::npos) {
+        head_ref = line.substr(4, 40);  // Extract SHA1
+        break;
+      }
+    }
+
+    if (head_ref.empty()) {
+      throw std::runtime_error("Could not find main/master ref");
+    }
+
+    // Download objects
+    std::set<std::string> downloaded_objects;
+    std::queue<std::string> objects_to_download;
+    objects_to_download.push(head_ref);
+
+    while (!objects_to_download.empty()) {
+      std::string obj_hash = objects_to_download.front();
+      objects_to_download.pop();
+
+      if (downloaded_objects.count(obj_hash) > 0) {
+        continue;
+      }
+
+      // Construct object URL
+      std::string obj_url =
+          repo_url + "/objects/" + obj_hash.substr(0, 2) + "/" + obj_hash.substr(2);
+
+      // Reset response buffer
+      response.clear();
+
+      // Configure object request
+      curl_easy_setopt(curl, CURLOPT_URL, obj_url.c_str());
+
+      // Perform request
+      res = curl_easy_perform(curl);
+      if (res != CURLE_OK) {
+        throw std::runtime_error(std::string("Failed to fetch object: ") + curl_easy_strerror(res));
+      }
+
+      // Create object directory if needed
+      fs::path obj_dir = dest_dir / ".git" / "objects" / obj_hash.substr(0, 2);
+      fs::create_directories(obj_dir);
+
+      // Write object file
+      fs::path obj_path = obj_dir / obj_hash.substr(2);
+      std::ofstream obj_file(obj_path, std::ios::binary);
+      obj_file.write(response.data(), response.size());
+      obj_file.close();
+
+      downloaded_objects.insert(obj_hash);
+
+      // If this is a commit or tree, parse it and add referenced objects
+      std::string obj_content = read_object_content(dest_dir / ".git", obj_hash);
+      if (obj_content.starts_with("tree ")) {
+        // Add tree hash to download queue
+        objects_to_download.push(obj_content.substr(5, 40));
+      } else if (obj_content.starts_with("commit ")) {
+        // Extract tree and parent commits
+        size_t tree_pos = obj_content.find("tree ");
+        if (tree_pos != std::string::npos) {
+          objects_to_download.push(obj_content.substr(tree_pos + 5, 40));
+        }
+
+        size_t parent_pos = obj_content.find("parent ");
+        while (parent_pos != std::string::npos) {
+          objects_to_download.push(obj_content.substr(parent_pos + 7, 40));
+          parent_pos = obj_content.find("parent ", parent_pos + 1);
+        }
+      }
+    }
+
+    // Write HEAD ref
+    std::ofstream head_file(dest_dir / ".git" / "HEAD");
+    head_file << "ref: refs/heads/main";
+    head_file.close();
+
+    // Write refs/heads/main
+    fs::create_directories(dest_dir / ".git" / "refs" / "heads");
+    std::ofstream ref_file(dest_dir / ".git" / "refs" / "heads" / "main");
+    ref_file << head_ref;
+    ref_file.close();
+
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+    return;
+  }
+
+  std::cout << "Repository cloned successfully to " << dest_dir << std::endl;
 }
