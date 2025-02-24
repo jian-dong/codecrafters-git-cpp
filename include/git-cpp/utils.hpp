@@ -11,6 +11,20 @@
 #include <vector>
 #include <zlib.h>
 #include <openssl/sha.h>
+#include <iostream>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <openssl/evp.h>
+#include <sstream>
+#include <cstring>
+#include <ctime>
+#include <arpa/inet.h>
+#include <curl/curl.h>
+#include <map>
+
 
 /**
  * @brief Decompresses zlib-compressed data.
@@ -39,3 +53,23 @@ void zlib_compress_file(const std::string& data, uLong* bound, unsigned char* de
  * @return The SHA1 hash in hex.
  */
 std::string sha_file(const std::string& data);
+
+inline std::string hash_to_hex(const std::string& hash) {
+  std::stringstream ss;
+  for (unsigned char c : hash) {
+    ss << std::hex << std::setw(2) << std::setfill('0')
+       << static_cast<int>(static_cast<unsigned char>(c));
+  }
+  return ss.str();
+}
+
+inline std::string get_sha1_raw_for_string(const std::string& data) {
+  EVP_MD_CTX* context = EVP_MD_CTX_new();
+  EVP_DigestInit_ex(context, EVP_sha1(), NULL);
+  EVP_DigestUpdate(context, data.c_str(), data.length());
+  unsigned char hash[20];
+  unsigned int length;
+  EVP_DigestFinal_ex(context, hash, &length);
+  EVP_MD_CTX_free(context);
+  return std::string(reinterpret_cast<char*>(hash), 20);
+}

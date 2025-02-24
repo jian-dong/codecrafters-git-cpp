@@ -35,7 +35,7 @@ std::string zlib_decompress(const std::string& compressed_data) {
   return decompressed;
 }
 
-void zlib_compress_file(const std::string& data, uLong* bound, unsigned char* dest) {
+void zlib_compress_file(const std::string& data, uLong* bound, Bytef* dest) {
   int ret = compress(dest, bound, reinterpret_cast<const Bytef*>(data.c_str()), data.size());
   if (ret != Z_OK) {
     throw std::runtime_error("Compression failed: " + std::to_string(ret));

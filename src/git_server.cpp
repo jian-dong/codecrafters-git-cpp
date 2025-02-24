@@ -356,120 +356,388 @@ void handle_git_commit_tree(const fs::path& git_dir, const std::string& tree_has
   std::cout << commit_hash << "\n";
 }
 
-void handle_git_clone(const std::string& repo_url, const fs::path& dest_dir) {
-    // Initialize CURL
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-        throw std::runtime_error("Failed to initialize CURL");
+const std::map<int, std::string> PACK_OBJECT_TYPES = {
+    {1, "commit"},   {2, "tree"}, {3, "blob"}, {4, "tag"}, {6, "ofs_delta"},  // offset delta
+    {7, "ref_delta"}                                                          // reference delta
+};
+
+struct GitRef {
+  std::string name;
+  std::string hash;
+};
+
+std::string get_object_path(const std::string& hash, const std::string& output_path = ".") {
+  return output_path + "/.git/objects/" + hash.substr(0, 2) + "/" + hash.substr(2);
+}
+
+void store_compressed_data(const std::string& hash, const std::vector<char>& compressed,
+                           const std::string& output_path = ".") {
+  std::string path = get_object_path(hash, output_path);
+  fs::create_directories(fs::path(path).parent_path());
+  std::ofstream output_file(path, std::ios::binary);
+  if (!output_file) {
+    throw std::runtime_error("Cannot open input file");
+  }
+  output_file.write(compressed.data(), compressed.size());
+  output_file.close();
+}
+
+std::vector<unsigned char> apply_delta(const std::vector<unsigned char>& base,
+                                       const std::vector<unsigned char>& delta) {
+  std::vector<unsigned char> result;
+  size_t pos = 0;
+
+  // Read source size (variable length)
+  size_t source_size = 0;
+  size_t shift = 0;
+  while (pos < delta.size()) {
+    unsigned char byte = delta[pos++];
+    source_size |= (byte & 127) << shift;
+    if (!(byte & 128)) break;
+    shift += 7;
+  }
+
+  // Read target size (variable length)
+  size_t target_size = 0;
+  shift = 0;
+  while (pos < delta.size()) {
+    unsigned char byte = delta[pos++];
+    target_size |= (byte & 127) << shift;
+    if (!(byte & 128)) break;
+    shift += 7;
+  }
+
+  // Apply delta instructions
+  while (pos < delta.size()) {
+    unsigned char cmd = delta[pos++];
+    if (cmd & 128) {  // copy instruction
+      size_t offset = 0;
+      size_t size = 0;
+      if (cmd & 1) offset |= delta[pos++];
+      if (cmd & 2) offset |= delta[pos++] << 8;
+      if (cmd & 4) offset |= delta[pos++] << 16;
+      if (cmd & 8) offset |= delta[pos++] << 24;
+      if (cmd & 16) size |= delta[pos++];
+      if (cmd & 32) size |= delta[pos++] << 8;
+      if (cmd & 64) size |= delta[pos++] << 16;
+      if (size == 0) size = 0x10000;
+
+      if (offset + size > base.size()) {
+        throw std::runtime_error("Delta copy out of bounds");
+      }
+      result.insert(result.end(), base.begin() + offset, base.begin() + offset + size);
+    } else if (cmd) {  // insert instruction
+      if (pos + cmd > delta.size()) {
+        throw std::runtime_error("Delta insert out of bounds");
+      }
+      result.insert(result.end(), delta.begin() + pos, delta.begin() + pos + cmd);
+      pos += cmd;
+    } else {
+      throw std::runtime_error("Invalid delta instruction");
+    }
+  }
+
+  if (result.size() != target_size) {
+    throw std::runtime_error("Delta reconstruction size mismatch");
+  }
+
+  return result;
+}
+
+void process_packfile(const std::string& pack_data, const std::string& output_path) {
+  // 0008NAK\n          NAK response
+  // PACK[...]          Packfile data
+  // 0000               End marker
+
+  // skip NAK
+  size_t pos = pack_data.find('\n');
+  pos++;
+
+  // check PACK
+  if (pack_data.substr(pos, 4) != "PACK") {
+    throw std::runtime_error("Invalid pack signature");
+  }
+  pos += 4;
+
+  // version parsing
+  uint32_t version;
+  memcpy(&version, pack_data.data() + pos, 4);
+  version = ntohl(version);
+  pos += 4;
+
+  // number of objects parsing
+  uint32_t num_objects;
+  memcpy(&num_objects, pack_data.data() + pos, 4);
+  num_objects = ntohl(num_objects);
+  pos += 4;
+
+  std::cout << "version: " << version << ", num_objects: " << num_objects
+            << ", size: " << pack_data.size() << std::endl;
+
+  // read each object
+  for (uint32_t i = 0; i < num_objects; i++) {
+    uint8_t byte = pack_data[pos++];
+    int type = (byte >> 4) & 7;
+    size_t size = byte & 15;
+    size_t shift = 4;
+
+    std::cout << "Processing object " << i << ", type: " << type << ", initial pos: " << pos
+              << std::endl;
+
+    // parse variable length size
+    while (byte & 128) {
+      byte = pack_data[pos++];
+      size |= (byte & 127) << shift;
+      shift += 7;
     }
 
+    std::cout << "Object size: " << size << ", pos after size: " << pos << std::endl;
+
+    size_t start_pos = pos;
+    if (type == 1 || type == 2 || type == 3 || type == 4) {
+      // decompress
+      z_stream zs;
+      memset(&zs, 0, sizeof(zs));
+      if (inflateInit(&zs) != Z_OK) {
+        throw std::runtime_error("Failed to initialize zlib");
+      }
+      zs.next_in = (Bytef*)(pack_data.data() + pos);
+      zs.avail_in = pack_data.size() - pos;
+      std::vector<unsigned char> uncompressed;
+      unsigned char outbuffer[8192];
+      do {
+        zs.next_out = outbuffer;
+        zs.avail_out = sizeof(outbuffer);
+        int ret = inflate(&zs, Z_NO_FLUSH);
+        if (ret != Z_OK && ret != Z_STREAM_END) {
+          inflateEnd(&zs);
+          throw std::runtime_error("Decompression failed");
+        }
+        uncompressed.insert(uncompressed.end(), outbuffer,
+                            outbuffer + (sizeof(outbuffer) - zs.avail_out));
+      } while (zs.avail_out == 0);
+      pos += zs.total_in;
+      inflateEnd(&zs);
+
+      // save
+      std::string full_object =
+          PACK_OBJECT_TYPES.at(type) + " " + std::to_string(uncompressed.size()) + '\0';
+      full_object.insert(full_object.end(), uncompressed.begin(), uncompressed.end());
+
+      // Compress the blob content
+      uLong compress_bound_size = compressBound(full_object.size());
+      std::vector<char> compressed_data(compress_bound_size);
+      zlib_compress_file(full_object, &compress_bound_size,
+                         reinterpret_cast<unsigned char*>(compressed_data.data()));
+      // Compute SHA1 hash of the blob
+      std::string hash = get_sha1_raw_for_string(full_object);
+      std::cout << "hash: " << hash_to_hex(hash) << std::endl;
+      store_compressed_data(hash_to_hex(hash), compressed_data, output_path);
+
+      // final check
+      if (uncompressed.size() != size) {
+        throw std::runtime_error("Uncompressed size mismatch");
+      }
+    } else if (type == 6) {  // ofs_delta
+      size_t offset = 0;
+      do {
+        if (pos >= pack_data.size()) {
+          throw std::runtime_error("Unexpected end of data while parsing offset");
+        }
+        byte = pack_data[pos++];
+        offset = ((offset + 1) << 7) | (byte & 127);
+      } while (byte & 128);
+    } else if (type == 7) {  // ref_delta
+      // Read 20-byte base object SHA-1
+      if (pos + 20 > pack_data.size()) {
+        throw std::runtime_error("Unexpected end of data while parsing ref-delta");
+      }
+      std::string raw_object_hash = pack_data.substr(pos, 20);
+      std::string object_hash = hash_to_hex(raw_object_hash);
+      pos += 20;
+
+      // decompress
+      z_stream zs;
+      memset(&zs, 0, sizeof(zs));
+      if (inflateInit(&zs) != Z_OK) {
+        throw std::runtime_error("Failed to initialize zlib");
+      }
+      zs.next_in = (Bytef*)(pack_data.data() + pos);
+      zs.avail_in = pack_data.size() - pos;
+      std::vector<unsigned char> uncompressed;
+      unsigned char outbuffer[8192];
+      do {
+        zs.next_out = outbuffer;
+        zs.avail_out = sizeof(outbuffer);
+        int ret = inflate(&zs, Z_NO_FLUSH);
+        if (ret != Z_OK && ret != Z_STREAM_END) {
+          inflateEnd(&zs);
+          throw std::runtime_error("Decompression failed");
+        }
+        uncompressed.insert(uncompressed.end(), outbuffer,
+                            outbuffer + (sizeof(outbuffer) - zs.avail_out));
+      } while (zs.avail_out == 0);
+      pos += zs.total_in;
+      inflateEnd(&zs);
+
+      std::cout << "object_hash: " << object_hash << std::endl;
+      // Get base object
+      std::string base_object = read_object_content(object_hash, output_path);
+
+      // Apply delta
+      std::vector<unsigned char> reconstructed = apply_delta(
+          std::vector<unsigned char>(base_object.begin(), base_object.end()), uncompressed);
+
+      // Save reconstructed object
+      std::string full_object = "blob " + std::to_string(reconstructed.size()) + '\0';
+      full_object.insert(full_object.end(), reconstructed.begin(), reconstructed.end());
+      // Compress the blob content
+      uLong compress_bound_size = compressBound(full_object.size());
+      std::vector<char> compressed_data(compress_bound_size);
+      zlib_compress_file(full_object, &compress_bound_size,
+                         reinterpret_cast<unsigned char*>(compressed_data.data()));
+      // Compute SHA1 hash of the blob
+      std::string hash = get_sha1_raw_for_string(full_object);
+      std::cout << "hash: " << hash_to_hex(hash) << std::endl;
+      store_compressed_data(hash_to_hex(hash), compressed_data, output_path);
+
+      // final check
+      if (uncompressed.size() != size) {
+        throw std::runtime_error("Uncompressed size mismatch");
+      }
+    }
+
+    // std::cout << "num: " << i << ", type: " << type << ", size: " << size << ", pos: " << pos <<
+    // std::endl;
+    std::cout << "Consumed bytes: " << (pos - start_pos) << std::endl;
+    std::cout << "New pos: " << pos << std::endl;
+    std::cout << "------------------------" << std::endl;
+  }
+}
+
+void handle_git_clone(const std::string& repo_url, const fs::path& dest_dir) {
+  // Initialize CURL
+  CURL* curl = curl_easy_init();
+  if (!curl) {
+    throw std::runtime_error("Failed to initialize CURL");
+  }
+
+  // Create destination directory
+  fs::create_directories(dest_dir);
+  fs::create_directories(dest_dir / ".git" / "objects");
+  fs::create_directories(dest_dir / ".git" / "refs");
+
+  try {
     // Normalize repository URL
     std::string normalized_url = repo_url;
-    if (normalized_url.ends_with(".git")) {
-        normalized_url = normalized_url.substr(0, normalized_url.length() - 4);
-    }
     if (normalized_url.ends_with("/")) {
-        normalized_url = normalized_url.substr(0, normalized_url.length() - 1);
+      normalized_url = normalized_url.substr(0, normalized_url.length() - 1);
     }
 
-    // Create destination directory structure
-    fs::create_directories(dest_dir / ".git" / "objects");
-    fs::create_directories(dest_dir / ".git" / "refs" / "heads");
+    // Get refs URL
+    std::string refs_url = normalized_url + ".git/info/refs?service=git-upload-pack";
+    std::cout << "Fetching from: " << refs_url << std::endl;
 
-    try {
-        // Set up common CURL options
-        struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, "Accept: */*");
-        headers = curl_slist_append(headers, "User-Agent: git/2.34.1");
+    // Set up common HTTP headers
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "Accept: */*");
+    headers = curl_slist_append(headers, "User-Agent: git/2.34.1");
 
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+    // Configure CURL request
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_URL, refs_url.c_str());
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
 
-        // First, try to verify repository exists
-        std::string check_url = normalized_url + "/info/refs";
-        curl_easy_setopt(curl, CURLOPT_URL, check_url.c_str());
+    // Buffer for response
+    std::string response;
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
+                     [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
+                       auto* response = static_cast<std::string*>(userdata);
+                       response->append(ptr, size * nmemb);
+                       return size * nmemb;
+                     });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
-        // Use a HEAD request first to check existence
-        curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
-        CURLcode res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-            throw std::runtime_error("Repository not found or not accessible");
-        }
+    // Perform request
+    CURLcode res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+      throw std::runtime_error(std::string("Failed to fetch refs: ") + curl_easy_strerror(res));
+    }
 
-        // Reset to normal GET requests
-        curl_easy_setopt(curl, CURLOPT_NOBODY, 0L);
+    // Parse refs response to get GitRefs
+    std::vector<GitRef> refs;
+    {
+      std::istringstream stream(response);
+      std::string line;
 
-        // Buffer for response data
-        std::string response_data;
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,
-            [](char* ptr, size_t size, size_t nmemb, void* userdata) -> size_t {
-                if (!ptr) return 0;
-                std::string* response = static_cast<std::string*>(userdata);
-                try {
-                    response->append(ptr, size * nmemb);
-                    return size * nmemb;
-                } catch (const std::exception&) {
-                    return 0;
-                }
-            });
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_data);
+      // Skip service line and 0000 line
+      std::getline(stream, line);
+      std::getline(stream, line);
 
-        // Get repository refs
-        std::string refs_url = normalized_url + "/info/refs?service=git-upload-pack";
-        curl_easy_setopt(curl, CURLOPT_URL, refs_url.c_str());
+      while (std::getline(stream, line)) {
+        if (line.length() < 4) continue;
 
-        response_data.clear();
-        res = curl_easy_perform(curl);
-        if (res != CURLE_OK) {
-            throw std::runtime_error(std::string("Failed to fetch refs: ") +
-                                   curl_easy_strerror(res));
-        }
+        // Parse length prefix
+        int length;
+        std::stringstream ss;
+        ss << std::hex << line.substr(0, 4);
+        ss >> length;
 
-        // Parse response to find HEAD ref
-        std::string head_sha;
-        std::istringstream response_stream(response_data);
-        std::string line;
-        while (std::getline(response_stream, line)) {
-            if (line.find("refs/heads/main") != std::string::npos ||
-                line.find("refs/heads/master") != std::string::npos) {
-                size_t sha_start = line.find_first_not_of("0123456789abcdef");
-                if (sha_start != std::string::npos && sha_start >= 40) {
-                    head_sha = line.substr(sha_start - 40, 40);
-                    break;
-                }
+        if (length == 0) continue;
+
+        if (length >= 44) {
+          std::string hash = line.substr(4, 40);
+          size_t name_start = line.find(" refs/");
+          if (name_start != std::string::npos) {
+            std::string name = line.substr(name_start + 1);
+            size_t null_pos = name.find('\0');
+            if (null_pos != std::string::npos) {
+              name = name.substr(0, null_pos);
             }
+            refs.push_back({name, hash});
+          }
         }
-
-        if (head_sha.empty()) {
-            throw std::runtime_error("Could not find main/master ref");
-        }
-
-        // Write HEAD ref
-        std::ofstream head_file(dest_dir / ".git" / "HEAD");
-        if (!head_file) {
-            throw std::runtime_error("Failed to create HEAD file");
-        }
-        head_file << "ref: refs/heads/main\n";
-        head_file.close();
-
-        // Write refs/heads/main
-        std::ofstream ref_file(dest_dir / ".git" / "refs" / "heads" / "main");
-        if (!ref_file) {
-            throw std::runtime_error("Failed to create ref file");
-        }
-        ref_file << head_sha << "\n";
-        ref_file.close();
-
-        // Clean up
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
-
-        std::cout << "Repository cloned successfully to " << dest_dir << std::endl;
-
-    } catch (const std::exception& e) {
-        curl_easy_cleanup(curl);
-        std::cerr << "Error: " << e.what() << std::endl;
-        throw;
+      }
     }
+
+    // Get upload pack URL
+    std::string upload_pack_url = normalized_url + ".git/git-upload-pack";
+
+    // Prepare want list
+    std::stringstream request_body;
+    for (const auto& ref : refs) {
+      std::string want_line = "want " + ref.hash + "\n";
+      std::stringstream length_prefix;
+      length_prefix << std::hex << std::setw(4) << std::setfill('0')
+                    << static_cast<unsigned int>(want_line.length() + 4);
+      request_body << length_prefix.str() << want_line;
+    }
+    request_body << "0000" << "0009done\n";
+    std::string request_str = request_body.str();
+
+    // Configure pack request
+    response.clear();
+    curl_easy_setopt(curl, CURLOPT_URL, upload_pack_url.c_str());
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request_str.c_str());
+
+    // Perform pack request
+    res = curl_easy_perform(curl);
+    if (res != CURLE_OK) {
+      throw std::runtime_error(std::string("Failed to fetch pack: ") + curl_easy_strerror(res));
+    }
+
+    // Process packfile
+    process_packfile(response, dest_dir.string());
+
+    // Clean up
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    std::cout << "Repository cloned successfully to " << dest_dir << std::endl;
+  } catch (const std::exception& e) {
+    curl_easy_cleanup(curl);
+    throw std::runtime_error("Clone failed: " + std::string(e.what()));
+  }
 }
