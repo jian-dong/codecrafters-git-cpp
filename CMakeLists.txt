@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.13)
 
-project(git-starter-cpp)
+project(git)
 
 #-------------------------------------------------------------------------------
 set(CMAKE_CXX_STANDARD 23)
@@ -29,21 +29,20 @@ endif ()
 
 
 find_package(OpenSSL REQUIRED)
-set(PROG_NAME git)
-add_executable(${PROG_NAME}
+add_executable(${PROJECT_NAME}
   src/main.cpp
   src/git_server.cpp
   src/utils.cpp
 )
 
-target_include_directories(${PROG_NAME} PRIVATE
+target_include_directories(${PROJECT_NAME} PRIVATE
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
   ${OPENSSL_INCLUDE_DIR}
 )
 
-target_link_libraries(${PROG_NAME} PRIVATE
+target_link_libraries(${PROJECT_NAME} PRIVATE
   OpenSSL::Crypto
   -lz
   -lpthread
