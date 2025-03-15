@@ -73,39 +73,7 @@ std::string read_tree_object(const fs::path& git_dir, const std::string& tree_ha
   object_file.close();
 
   // Decompress the content
-  z_stream zStream;
-  zStream.zalloc = Z_NULL;
-  zStream.zfree = Z_NULL;
-  zStream.opaque = Z_NULL;
-  zStream.avail_in = compressed_content.size();
-  zStream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressed_content.data()));
-
-  if (inflateInit2(&zStream, 15 + 32) != Z_OK) {
-    // 15 + 32 for gzip and zlib both, auto detect
-    throw std::runtime_error("Failed to initialize zlib inflate");
-  }
-
-  std::string decompressed_content;
-  int ret;
-  do {
-    char buffer[1024];
-    zStream.avail_out = sizeof(buffer);
-    zStream.next_out = reinterpret_cast<Bytef*>(buffer);
-
-    ret = inflate(&zStream, Z_SYNC_FLUSH);  // Z_SYNC_FLUSH to handle potential errors
-
-    if (ret < 0 && ret != Z_BUF_ERROR && ret != Z_OK && ret != Z_STREAM_END) {
-      inflateEnd(&zStream);
-      throw std::runtime_error("Zlib inflate error: " + std::to_string(ret));
-    }
-
-    if (ret == Z_BUF_ERROR || ret == Z_OK || ret == Z_STREAM_END) {
-      decompressed_content.append(buffer, sizeof(buffer) - zStream.avail_out);
-    }
-  } while (ret != Z_STREAM_END && zStream.avail_out == 0);
-
-  inflateEnd(&zStream);
-
+  auto decompressed_content = zlib_decompress_string(compressed_content);
   // Parse the content
   std::istringstream content_stream(decompressed_content);
   std::string type;
@@ -158,7 +126,6 @@ std::string write_tree(const fs::path& directory) {
   std::vector<TreeEntry> entries;
 
   for (const auto& entry : fs::directory_iterator(directory)) {
-    // Skip .git 目录
     if (entry.path().filename() == ".git") continue;
 
     if (fs::is_directory(entry.path())) {
@@ -168,32 +135,26 @@ std::string write_tree(const fs::path& directory) {
       std::string blobHash = hash_object(entry.path().string());
       entries.push_back({"100644", entry.path().filename().string(), blobHash});
     }
-    // 其他类型（如符号链接）可以按需求处理
   }
 
-  // 按文件名排序
   std::sort(entries.begin(), entries.end(),
             [](const TreeEntry& a, const TreeEntry& b) { return a.name < b.name; });
 
-  // 构造 tree body：每个 entry 为 "<mode> <filename>\0" + raw hash(20 字节)
   std::string tree_body;
   for (const auto& e : entries) {
     tree_body += e.mode + " " + e.name + '\0';
     tree_body += hex_to_bytes(e.hash);
   }
 
-  // 构造完整的 tree 对象内容： header + body
   std::string full_content = "tree " + std::to_string(tree_body.size()) + '\0' + tree_body;
   std::string tree_hash = compute_sha1(full_content);
 
-  // 压缩内容并写入 .git/objects
   uLong compress_bound_size = compressBound(full_content.size());
   std::vector<unsigned char> compressedData(compress_bound_size);
   zlib_compress(full_content, &compress_bound_size, compressedData.data());
 
   fs::path git_dir = find_git_root(fs::current_path());
   if (git_dir.empty()) {
-    // 如果没有找到，则默认在当前目录下的 .git 文件夹
     git_dir = fs::current_path() / ".git";
   }
   fs::path object_dir = git_dir / "objects" / tree_hash.substr(0, 2);
@@ -330,16 +291,6 @@ void handle_git_commit_tree(const fs::path& git_dir, const std::string& tree_has
   std::cout << commit_hash << "\n";
 }
 
-const std::map<int, std::string> PACK_OBJECT_TYPES = {
-    {1, "commit"},   {2, "tree"}, {3, "blob"}, {4, "tag"}, {6, "ofs_delta"},  // offset delta
-    {7, "ref_delta"}                                                          // reference delta
-};
-
-struct GitRef {
-  std::string name;
-  std::string hash;
-};
-
 std::string get_object_path(const std::string& hash, const std::string& output_path = ".") {
   return output_path + "/.git/objects/" + hash.substr(0, 2) + "/" + hash.substr(2);
 }
@@ -361,7 +312,7 @@ size_t pack_data_callback(void* received_data, size_t element_size, size_t num_e
                           void* userdata) {
   auto* accumulated_data = (std::string*)userdata;
   *accumulated_data += std::string(static_cast<char*>(received_data), num_element);
-
+  (void)accumulated_data;
   return element_size * num_element;
 }
 
@@ -717,36 +668,7 @@ std::string read_object_content(const fs::path& git_dir, const std::string& obje
   object_file.close();
 
   // Decompress the content
-  z_stream zStream;
-  memset(&zStream, 0, sizeof(zStream));
-  zStream.zalloc = Z_NULL;
-  zStream.zfree = Z_NULL;
-  zStream.opaque = Z_NULL;
-
-  if (inflateInit(&zStream) != Z_OK) {
-    throw std::runtime_error("Failed to initialize zlib inflate");
-  }
-
-  zStream.avail_in = compressed_data.size();
-  zStream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(compressed_data.data()));
-
-  std::string decompressed_content;
-  char buffer[4096];
-
-  do {
-    zStream.avail_out = sizeof(buffer);
-    zStream.next_out = reinterpret_cast<Bytef*>(buffer);
-
-    int ret = inflate(&zStream, Z_NO_FLUSH);
-    if (ret != Z_OK && ret != Z_STREAM_END) {
-      inflateEnd(&zStream);
-      throw std::runtime_error("Zlib inflate error: " + std::to_string(ret));
-    }
-
-    decompressed_content.append(buffer, sizeof(buffer) - zStream.avail_out);
-  } while (zStream.avail_out == 0);
-
-  inflateEnd(&zStream);
+  auto decompressed_content = zlib_decompress_string(compressed_data);
 
   // Find the null byte that separates the header from the content
   size_t null_pos = decompressed_content.find('\0');
