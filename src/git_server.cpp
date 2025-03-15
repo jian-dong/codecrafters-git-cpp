@@ -514,7 +514,7 @@ void compress_and_store(const std::string& hash, const std::string& content,
   std::string object_file_path = object_path + hash.substr(2);
   if (!std::filesystem::exists(object_file_path)) {
     FILE* output = fopen(object_file_path.c_str(), "wb");
-    if (zlib_compress_file(input, output) != EXIT_SUCCESS) {
+    if (!zlib_compress_file(input, output)) {
       std::cerr << "Failed to compress data.\n";
       return;
     }
