@@ -333,7 +333,7 @@ size_t write_callback(void* received_data, size_t element_size, size_t num_eleme
   return total_size;
 }
 
-std::pair<std::string, std::string> curl_request(const std::string& url) {
+std::pair<std::string, std::string> fetch_git_repository_data(const std::string& url) {
   CURL* handle = curl_easy_init();
   if (handle) {
     // fetch info/refs
@@ -551,106 +551,103 @@ void restore_tree(const std::string& tree_hash, const std::string& dir,
   }
 }
 
-void handle_git_clone(const std::string& repo_url, const fs::path& dest_dir) {
-  // Create the destination directory if it doesn't exist
-  fs::create_directories(dest_dir);
-
-  // Initialize git repository in the destination directory
-  handle_git_init(dest_dir);
-  // fetch the repository
-  auto [pack, pack_hash] = curl_request(repo_url);
-
-  // parse the pack file
+// Parse the pack file header to get the number of objects
+int parse_pack_header(const std::string& pack_data) {
   int num_objects = 0;
   for (int i = 16; i < 20; i++) {
-    num_objects = num_objects << 8;
-    num_objects = num_objects | (unsigned char)pack[i];
+    num_objects = (num_objects << 8) | static_cast<unsigned char>(pack_data[i]);
   }
-  pack = pack.substr(20, pack.length() - 40);  // removing the headers of HTTP
-
-  // proecessing object files in a git pack file
-  int object_type;
-  size_t current_position = 0;
-  std::string master_commit_contents;
-  for (int object_index = 0; object_index < num_objects; object_index++) {
-    // extract object type from the first byte
-    object_type = (pack[current_position] & 112) >> 4;  // 112 is 11100000
-
-    // read the object's length
-    size_t object_length = read_length(pack, &current_position);
-    (void)object_length;
-
-    // process based on object type
-    if (object_type == 6) {  // offset deltas: ignore it
-      throw std::invalid_argument("Offset deltas not implemented.\n");
-    } else if (object_type == 7) {  // reference deltas
-      // process reference deltas
-      std::string digest = pack.substr(current_position, 20);
-      std::string hash = hash_to_hex(digest);
-      current_position += 20;
-
-      // read the base object's contents
-      std::ifstream file(dest_dir.filename().string() + "/.git/objects/" + hash.insert(2, "/"));
-      std::stringstream buffer;
-      buffer << file.rdbuf();
-      std::string file_contents = buffer.str();
-
-      std::string base_object_contents = zlib_decompress_string(file_contents);
-
-      // extract and remove the object type
-      std::string object_type_extracted =
-          base_object_contents.substr(0, base_object_contents.find(" "));
-      base_object_contents = base_object_contents.substr(base_object_contents.find('\0') + 1);
-
-      // apply delta to base object
-      std::string delta_contents = zlib_decompress_string(pack.substr(current_position));
-      std::string reconstructed_contents = apply_delta(delta_contents, base_object_contents);
-
-      // reconstruct the object with its type and length
-      reconstructed_contents = object_type_extracted + ' ' +
-                               std::to_string(reconstructed_contents.length()) + '\0' +
-                               reconstructed_contents;
-
-      // compute the object hash and store it
-      std::string object_hash = compute_sha1(reconstructed_contents);
-      compress_and_store(object_hash.c_str(), reconstructed_contents, dest_dir.string());
-
-      // advance position past the delta data
-      std::string compressed_delta = zlib_compress_string(delta_contents);
-      current_position += compressed_delta.length();
-
-      // update master commits if hash matches
-      if (hash.compare(pack_hash) == 0) {
-        master_commit_contents = reconstructed_contents.substr(reconstructed_contents.find('\0'));
-      }
-    } else {  // other object types (1: commit, 2: tree, other: blob)
-      // process standard objects
-      std::string object_contents = zlib_decompress_string(pack.substr(current_position));
-      current_position += zlib_compress_string(object_contents).length();
-
-      // prepare object header
-      std::string object_type_str = (object_type == 1)   ? "commit "
-                                    : (object_type == 2) ? "tree "
-                                                         : "blob ";
-      object_contents =
-          object_type_str + std::to_string(object_contents.length()) + '\0' + object_contents;
-
-      // store the object and update master commits if hash matches
-      std::string object_hash = compute_sha1(object_contents);
-      std::string compressed_object = zlib_compress_string(object_contents);
-      compress_and_store(object_hash.c_str(), object_contents, dest_dir.string());
-      if (object_hash.compare(pack_hash) == 0) {
-        master_commit_contents = object_contents.substr(object_contents.find('\0'));
-      }
-    }
-  }
-
-  // restore the tree
-  std::string tree_hash =
-      master_commit_contents.substr(master_commit_contents.find("tree") + 5, 40);
-  restore_tree(tree_hash, dest_dir.string(), dest_dir.string());
+  return num_objects;
 }
 
+// Extract the object type from the byte at the current position
+int extract_object_type(const std::string& pack_data, size_t position) {
+  return (pack_data[position] & 0x70) >> 4;  // 0x70 is binary 01110000
+}
+
+// Read a base object from the object database
+
+std::string read_base_object(const std::string& hash, const fs::path& dest_dir) {
+  std::string path =
+      dest_dir.filename().string() + "/.git/objects/" + hash.substr(0, 2) + "/" + hash.substr(2);
+  std::ifstream file(path);
+  std::stringstream buffer;
+  buffer << file.rdbuf();
+  return zlib_decompress_string(buffer.str());
+}
+
+// Extract the object type string from the object contents
+std::string extract_object_type_string(const std::string& object_contents) {
+  return object_contents.substr(0, object_contents.find(" "));
+}
+
+// Process a reference delta object
+std::tuple<std::string, std::string, size_t> process_reference_delta(const std::string& pack_data,
+                                                                     size_t current_position,
+                                                                     const fs::path& dest_dir) {
+  // Read the base object hash
+  std::string digest = pack_data.substr(current_position, 20);
+  std::string base_hash = hash_to_hex(digest);
+  current_position += 20;
+
+  // Read the base object contents
+  std::string base_object_contents = read_base_object(base_hash, dest_dir);
+  std::string object_type = extract_object_type_string(base_object_contents);
+  base_object_contents = base_object_contents.substr(base_object_contents.find('\0') + 1);
+
+  // Apply delta to the base object
+  std::string delta_contents = zlib_decompress_string(pack_data.substr(current_position));
+  std::string reconstructed_contents = apply_delta(delta_contents, base_object_contents);
+
+  // Reconstruct the full object
+  std::string full_object = object_type + ' ' + std::to_string(reconstructed_contents.length()) +
+                            '\0' + reconstructed_contents;
+
+  // Compute object hash
+  std::string object_hash = compute_sha1(full_object);
+
+  // Update position pointer
+  std::string compressed_delta = zlib_compress_string(delta_contents);
+  current_position += compressed_delta.length();
+
+  return {object_hash, full_object, current_position};
+}
+
+// Process a regular git object (commit, tree, or blob)
+std::tuple<std::string, std::string, size_t> process_regular_object(const std::string& pack_data,
+                                                                    size_t current_position,
+                                                                    int object_type) {
+  // Decompress object contents
+  std::string raw_content = zlib_decompress_string(pack_data.substr(current_position));
+
+  // Update position pointer
+  std::string compressed_content = zlib_compress_string(raw_content);
+  current_position += compressed_content.length();
+
+  // Get object type string
+  std::string type_str;
+  if (object_type == 1)
+    type_str = "commit";
+  else if (object_type == 2)
+    type_str = "tree";
+  else
+    type_str = "blob";
+
+  // Build the full object
+  std::string full_object =
+      type_str + ' ' + std::to_string(raw_content.length()) + '\0' + raw_content;
+
+  // Compute object hash
+  std::string object_hash = compute_sha1(full_object);
+
+  return {object_hash, full_object, current_position};
+}
+
+// Extract tree hash from commit contents and restore the file tree
+void restore_file_tree(const std::string& commit_contents, const fs::path& dest_dir) {
+  std::string tree_hash = commit_contents.substr(commit_contents.find("tree") + 5, 40);
+  restore_tree(tree_hash, dest_dir.string(), dest_dir.string());
+}
 // This function needs to be fixed to properly read an object
 std::string read_object_content(const fs::path& git_dir, const std::string& object_hash) {
   fs::path object_path = git_dir / "objects" / object_hash.substr(0, 2) / object_hash.substr(2);
@@ -684,4 +681,53 @@ std::string read_object_content(const fs::path& git_dir, const std::string& obje
 std::string read_object_content(const std::string& object_hash, const std::string& repo_path) {
   fs::path git_dir = fs::path(repo_path) / ".git";
   return read_object_content(git_dir, object_hash);
+}
+
+void handle_git_clone(const std::string& repo_url, const fs::path& dest_dir) {
+  // Create destination directory and initialize Git repository
+  fs::create_directories(dest_dir);
+  handle_git_init(dest_dir);
+
+  // Fetch repository data
+  auto [pack_data, master_hash] = fetch_git_repository_data(repo_url);
+
+  // Parse pack file header
+  int num_objects = parse_pack_header(pack_data);
+  pack_data = pack_data.substr(20, pack_data.length() - 40);  // Remove HTTP headers
+
+  // Process all objects in the pack
+  std::string master_commit_contents;
+  size_t current_position = 0;
+
+  for (int i = 0; i < num_objects; i++) {
+    // Extract object type
+    int object_type = extract_object_type(pack_data, current_position);
+    size_t object_length = read_length(pack_data, &current_position);
+    (void)object_length;  // unused
+
+    // Process based on object type
+    std::string object_hash;
+    std::string object_contents;
+
+    if (object_type == 6) {  // Offset deltas
+      throw std::invalid_argument("Offset deltas not implemented");
+    } else if (object_type == 7) {  // Reference deltas
+      std::tie(object_hash, object_contents, current_position) =
+          process_reference_delta(pack_data, current_position, dest_dir);
+    } else {  // Regular objects: commit(1), tree(2), blob(others)
+      std::tie(object_hash, object_contents, current_position) =
+          process_regular_object(pack_data, current_position, object_type);
+    }
+
+    // Save object to filesystem
+    compress_and_store(object_hash, object_contents, dest_dir.string());
+
+    // Check if this is the master commit object
+    if (object_hash == master_hash) {
+      master_commit_contents = object_contents.substr(object_contents.find('\0') + 1);
+    }
+  }
+
+  // Restore the file tree
+  restore_file_tree(master_commit_contents, dest_dir);
 }
