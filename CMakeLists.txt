@@ -29,22 +29,55 @@ endif ()
 
 
 find_package(OpenSSL REQUIRED)
-add_executable(${PROJECT_NAME}
-  src/main.cpp
-  src/git_server.cpp
+
+add_library(gitcpp_core
+  src/git_cli_application.cpp
+  src/git_fs.cpp
+  src/git_object_store.cpp
+  src/git_object_format.cpp
+  src/git_pack.cpp
+  src/git_remote_client.cpp
+  src/git_repository.cpp
   src/utils.cpp
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE
+target_include_directories(gitcpp_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/CLI11/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/third_party/expected/include>
   $<INSTALL_INTERFACE:include>
   ${OPENSSL_INCLUDE_DIR}
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE
+target_link_libraries(gitcpp_core PUBLIC
   OpenSSL::Crypto
   -lz
   -lpthread
   -lcurl
 )
+
+add_executable(${PROJECT_NAME}
+  src/main.cpp
+)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE gitcpp_core)
+
+include(CTest)
+if (BUILD_TESTING)
+  set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+  add_subdirectory(third_party/googletest EXCLUDE_FROM_ALL)
+  include(GoogleTest)
+
+  add_executable(git_object_format_test
+    tests/git_object_format_test.cpp
+  )
+  target_link_libraries(git_object_format_test PRIVATE gitcpp_core GTest::gtest_main)
+  gtest_discover_tests(git_object_format_test)
+
+  add_executable(git_pack_test
+    tests/git_pack_test.cpp
+  )
+  target_link_libraries(git_pack_test PRIVATE gitcpp_core GTest::gtest_main)
+  gtest_discover_tests(git_pack_test)
+endif ()
